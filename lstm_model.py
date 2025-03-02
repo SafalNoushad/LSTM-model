@@ -1,23 +1,31 @@
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
+from tensorflow.keras.models import Sequential # type: ignore
+from tensorflow.keras.layers import LSTM, Dense, Dropout # type: ignore
+from tensorflow.keras.callbacks import EarlyStopping # type: ignore
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-# ✅ Load dataset
-df = pd.read_csv("menstrual_data/FedCycleData071012.csv")  # Update path if needed
-print(df.head())  # Show first few rows
+# Load dataset
+df = pd.read_csv("menstrual_data/FedCycleData071012.csv")  # Update with your file path
 
-# ✅ Select relevant features (adjust column names as needed)
-df = df[['CycleNumber']]  # Modify if needed
+# Features for cycle prediction
+features = ["CycleNumber", "LengthofCycle", "MeanCycleLength", 
+            "EstimatedDayofOvulation", "LengthofLutealPhase"]
 
-# ✅ Normalize the data using MinMaxScaler
+# Ensure the dataset contains only relevant columns
+df = df[features]
+
+# 🔴 FIX: Convert non-numeric values to NaN and replace missing values
+df[features] = df[features].apply(pd.to_numeric, errors='coerce')
+df.fillna(df.median(), inplace=True)  # Replace NaNs with median values
+
+# Normalize data
 scaler = MinMaxScaler(feature_range=(0, 1))
-scaled_data = scaler.fit_transform(df)
+df_scaled = scaler.fit_transform(df)
 
-# ✅ Function to create sequences for LSTM
+# Prepare sequences for LSTM
 def create_sequences(data, seq_length):
     X, y = [], []
     for i in range(len(data) - seq_length):
@@ -25,48 +33,49 @@ def create_sequences(data, seq_length):
         y.append(data[i+seq_length, 0])  # Predicting 'CycleNumber'
     return np.array(X), np.array(y)
 
-seq_length = 10  # Use past 10 cycles for prediction
-X, y = create_sequences(scaled_data, seq_length)
+SEQ_LENGTH = 10  # Number of past cycles to consider
+X, y = create_sequences(df_scaled, SEQ_LENGTH)
 
-# ✅ Split into training and testing sets (80% train, 20% test)
-train_size = int(len(X) * 0.8)
-X_train, X_test = X[:train_size], X[train_size:]
-y_train, y_test = y[:train_size], y[train_size:]
+# Split into training and testing sets (80% train, 20% test)
+split_idx = int(len(X) * 0.8)
+X_train, X_test = X[:split_idx], X[split_idx:]
+y_train, y_test = y[:split_idx], y[split_idx:]
 
-# ✅ Reshape input to fit LSTM (samples, timesteps, features)
-X_train = np.reshape(X_train, (X_train.shape[0], X_train.shape[1], 1))
-X_test = np.reshape(X_test, (X_test.shape[0], X_test.shape[1], 1))
+# Reshape for LSTM input
+X_train = X_train.reshape((X_train.shape[0], X_train.shape[1], len(features)))
+X_test = X_test.reshape((X_test.shape[0], X_test.shape[1], len(features)))
 
-# ✅ Build the LSTM model
+# Build LSTM model
 model = Sequential([
-    LSTM(50, return_sequences=True, input_shape=(seq_length, 1)),
+    LSTM(100, return_sequences=True, input_shape=(SEQ_LENGTH, len(features))),
     Dropout(0.2),
     LSTM(50, return_sequences=False),
     Dropout(0.2),
-    Dense(25),
-    Dense(1)  # Output layer for predicting CycleNumber
+    Dense(25, activation="relu"),
+    Dense(1)  # Output layer for CycleNumber prediction
 ])
 
-# ✅ Compile model
-model.compile(optimizer='adam', loss='mean_squared_error')
+model.compile(optimizer="adam", loss="mse")
 
-# ✅ Train the model
-history = model.fit(X_train, y_train, epochs=50, batch_size=16, validation_data=(X_test, y_test))
+# Train model with early stopping
+early_stop = EarlyStopping(monitor="val_loss", patience=5, restore_best_weights=True)
+history = model.fit(X_train, y_train, epochs=50, batch_size=16, validation_data=(X_test, y_test), callbacks=[early_stop])
 
-# ✅ Evaluate model
-loss = model.evaluate(X_test, y_test)
-print(f"Test Loss: {loss}")
+# Make predictions
+y_pred = model.predict(X_test)
 
-# ✅ Predict future cycle numbers
-predictions = model.predict(X_test)
+# Inverse transform predictions
+y_test_actual = scaler.inverse_transform(np.concatenate((y_test.reshape(-1, 1), np.zeros((len(y_test), len(features) - 1))), axis=1))[:, 0]
+y_pred_actual = scaler.inverse_transform(np.concatenate((y_pred, np.zeros((len(y_pred), len(features) - 1))), axis=1))[:, 0]
 
-# ✅ Reshape predictions for inverse scaling
-predictions = predictions.reshape(-1, 1)
-predictions = scaler.inverse_transform(predictions)  # Convert back to original scale
+# Evaluate performance
+mae = mean_absolute_error(y_test_actual, y_pred_actual)
+rmse = np.sqrt(mean_squared_error(y_test_actual, y_pred_actual))
+print(f"MAE: {mae:.2f}, RMSE: {rmse:.2f}")
 
-# ✅ Plot the results
+# Plot results
 plt.figure(figsize=(10, 5))
-plt.plot(range(len(y_test)), scaler.inverse_transform(y_test.reshape(-1, 1)), label="Actual Cycle")
-plt.plot(range(len(predictions)), predictions, label="Predicted Cycle", linestyle='dashed')
+plt.plot(y_test_actual, label="Actual Cycle", linestyle="-", color="blue")
+plt.plot(y_pred_actual, label="Predicted Cycle", linestyle="--", color="orange")
 plt.legend()
 plt.show()
